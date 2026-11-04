@@ -1,0 +1,54 @@
+{
+  "version": "1.1.0",
+  "skillHash": "sha256:f548bdb5141eb808ce57361082ec248fa1fbdb5fa5ccd6a5a4f35088481f4d07",
+  "scoredAt": "2026-10-24T22:06:41.637Z",
+  "backend": "ollama",
+  "model": "gpt-oss:20b-64k",
+  "quality": {
+    "score": 93,
+    "dimensions": {
+      "clarity": "PASS",
+      "completeness": "WEAK",
+      "conciseness": "PASS",
+      "actionability": "PASS",
+      "crossPlatform": "PASS",
+      "examples": "PASS"
+    },
+    "issues": [
+      {
+        "severity": "MEDIUM",
+        "category": "completeness",
+        "detail": "The skill file does not cover all error scenarios and edge cases."
+      }
+    ]
+  },
+  "security": {
+    "verdict": "SAFE",
+    "issues": []
+  },
+  "impact": {
+    "multiplier": 4.35,
+    "baselineAvg": 23,
+    "treatmentAvg": 100,
+    "scenarios": [
+      {
+        "name": "resize-grayscale-folder",
+        "baseline": 0,
+        "treatment": 100,
+        "rationale": "Response B fully satisfies the rubric, while Response A uses ImageMagick instead of cv2 and thus does not meet the specified requirements."
+      },
+      {
+        "name": "detect-objects-video-stream",
+        "baseline": 0,
+        "treatment": 100,
+        "rationale": "Response A fully satisfies all rubric requirements, while Response B does not use the specified OpenCV dnn functions and thus fails the rubric."
+      },
+      {
+        "name": "count-circles-contour",
+        "baseline": 70,
+        "treatment": 100,
+        "rationale": "Response B follows the rubric exactly, while Response A uses a circularity check instead of the required vertex count criterion."
+      }
+    ]
+  }
+}

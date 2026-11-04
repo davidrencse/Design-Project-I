@@ -1,81 +1,122 @@
-# AirPen: real-time stroke input from camera + Arduino UNO Q
+# AirPen: control your Arch laptop with hand gestures
 
-Evolution of the IMU stylus in `Write-Up.pdf`. The write-up's main limitation is that IMU
-position drifts, because it comes from double-integrating acceleration. A camera measures
-**absolute** fingertip position, so it is the primary input. The UNO Q supplies motion when
-the hand is off camera, and later it can provide a physical pen-down signal.
+Your webcam watches your hands. Gestures move the real cursor, click, scroll, zoom and switch
+workspaces in any app. It runs in the background, so no window has to stay open.
 
-```
-webcam ─► MediaPipe HandLandmarker (21 pts) ─► gestures ─► One Euro filter ─┐
-                                                                            ├─► OS mouse (OneNote, Paint, any app)
-UNO Q (IMU on MCU ─Bridge─► Linux ─UDP─►) ─► fallback (dx,dy,pen) ──────────┘    or built-in canvas
-```
-
-## Run
+## Start / stop
 
 ```
-run.bat                 # opens in preview mode: nothing is controlled yet
-run.bat --mode canvas   # draw in AirPen's own whiteboard
-run.bat --mode mouse    # control the real cursor
+./run.sh            # start in the background (first run sets everything up)
+./run.sh stop       # stop
+./run.sh show       # open or hide the camera preview (closing it does NOT stop AirPen)
+./run.sh status     # is it running?
+./run.sh fg         # run in this terminal with the preview open, Ctrl+C to quit
+./run.sh calibrate  # fit every gesture threshold to YOUR hand (about 1 minute). Do this first.
 ```
 
-| Gesture | Action |
+The preview draws holographic linework on your hands: fingertip and palm reticles, finger
+traces, and live rotation / distance / grip readouts. Press `l` to switch to the plain camera.
+
+A desktop notification tells you whenever the mode changes.
+
+To start it at every login, add this line to `~/.config/hypr/hyprland.conf`:
+
+```
+exec-once = "/home/czr/projects/DESIGN PROJ/Design-Project-I/run.sh" start
+```
+
+## Two modes
+
+AirPen starts in **gesture mode**. **Hold a fist for about 0.6 s** to switch to **mouse mode**,
+and do it again to switch back. If your hand leaves the camera for 2.5 s, AirPen drops back
+to gesture mode by itself.
+
+### Gesture mode (default)
+
+| Do this | Get this |
 |---|---|
-| Hold thumb + index like a pen; the pen tip is the midpoint between them | Move cursor |
-| Pinch thumb + index | Pen down / left button held (writes in OneNote's Draw tab) |
-| Pinch thumb + middle | Right click |
-| Fist | Clutch: cursor freezes; reposition your hand, then open it to continue |
-| Index + middle up, others folded | Scroll (move hand up/down) |
+| Open palm, swipe left / right | Next / previous workspace |
+| Thumb + index spread apart / pinch together (other fingers folded) | Zoom in / out |
+| Point index finger up / down and hold it still | Scroll up / down. Hold to scroll faster |
 
-Keys: `1/2/3` preview / mouse / canvas · `r` recenter · `x` clear · `s` save canvas · `q` quit.
-**F8 works from any app and toggles mouse control off. It is your panic button.** F10 quits.
+### Mouse mode
 
-Text generation for the demo: write in OneNote with AirPen in mouse mode, then use OneNote's
-**Draw → Ink to Text**. That gives handwriting recognition without training a model.
+| Do this | Get this |
+|---|---|
+| Move your hand | Move the cursor |
+| Tap thumb + index (keep the other fingers relaxed and straight) | Left click (hold = drag) |
+| Tap thumb + middle | Right click |
+| Point index finger up / down and hold it still | Scroll up / down |
+| Short fist | Freeze the cursor (reposition your hand) |
 
-Test the off-camera fallback without hardware: move your hand out of view, then run
-`.venv\Scripts\python.exe tools\fake_unoq.py`. The cursor will trace a figure-eight.
+### Any mode
 
-Tuning lives at the top of `airpen/main.py` (`BOX`: active region) and `airpen/gestures.py`
-(`PINCH_ON/OFF`). Smoothing is set where `OneEuro2D(min_cutoff, beta)` is called.
+| Do this | Get this |
+|---|---|
+| Both index fingers pointing, move them apart / together | Zoom in / out |
+| Both palms open and still for 1.5 s | Pause / resume AirPen |
 
-## UNO Q ideation (not built yet)
+Zoom sends Ctrl + scroll wheel, which works in browsers, image viewers and most editors.
+Workspaces switch with `hyprctl dispatch workspace e±1`.
 
-The UNO Q has two brains: a Qualcomm Linux MPU and an STM32U585 MCU, joined by the Bridge RPC.
-Its USB-C port connects to the Linux side, so the simplest PC link is Wi-Fi UDP using the
-protocol already implemented in `airpen/fallback.py`: `dx,dy,pen\n`.
+**How it avoids false triggers:**
+- **Ring finger:** in a real tap it stays straight. In a resting hand, a fist or a point it's
+  curled, so those never click.
+- **Zoom vs scroll:** zoom starts only when the thumb–index distance actually *moves*. A
+  pointing finger has to be held still to scroll.
+- **Pointing:** needs a fully straight index finger, so a relaxed, half-curled hand doesn't
+  scroll.
 
-1. **IMU wand / ring (best fit with the write-up).** Plug a Modulino Movement (LSM6DSOX) into
-   the Qwiic port, or use an MPU-6050 over I2C. The MCU reads at about 200 Hz and uses the
-   **gyroscope as an air mouse** (angular rate maps to dx,dy). This avoids double integration,
-   so it doesn't drift the way the write-up feared. A button gives pen-down. The MCU calls
-   `Bridge.notify`, Python on the board receives it and sends UDP to the PC.
-2. **Sensor fusion (the strong "design project" story).** While the hand is on camera, use
-   camera position to estimate the IMU's bias continuously. That is the "online bias
-   estimation" from the write-up, with the camera as ground truth. Off camera, the IMU
-   coasts on the corrected model.
-3. **Physical pen-down.** A force sensor (FSR) or button on the fingertip tells you exactly
-   when ink should flow. Pinch detection is the weakest part of camera-only input.
-4. **Feedback.** Use the 8×13 LED matrix to show mode and pen state (camera, IMU, or lost),
-   with a buzzer tick on click.
-5. **Stretch: run the vision on the UNO Q itself.** Plug a USB webcam into the board, run
-   MediaPipe on its Linux side, and send cursor coordinates to the PC. That makes it a
-   standalone device; expect lower fps.
+## Accuracy and calibration
 
-## Prior art reviewed
+`./run.sh calibrate` records your hand doing each gesture (about 1 minute) and fits every
+threshold to it. Taps are split into "touching" and "released" frames. The press threshold
+sits above your touching plateau; the release threshold sits under your *quickest* release,
+since fast taps only open for a single frame. Then it replays your recording through the
+classifier and prints what each step was read as, along with any taps found:
 
-- Virtual mouse (MediaPipe + pyautogui/pynput): [hemil13/Virtual-Mouse](https://github.com/hemil13/Virtual-Mouse),
-  [Vyomrana02/Virtual_Mouse](https://github.com/Vyomrana02/Virtual_Mouse),
-  [Gokul9404/Hand-controlled-VR-Mouse](https://github.com/Gokul9404/Hand-controlled-VR-Mouse),
-  [yunwoong7/virtual_mouse](https://github.com/yunwoong7/virtual_mouse).
-  Borrowed: active-region mapping, pinch-to-click, scroll gesture.
-- Air writing/canvas: [Ankur3509/AirDraw](https://github.com/Ankur3509/AirDraw),
-  [machine-canvas-developers/air-canvas](https://github.com/machine-canvas-developers/air-canvas),
-  prnvbaraiya/Air-Writing-and-Character-Recognition. Borrowed: pinch = pen down, canvas overlay.
-- Smoothing: One Euro Filter (Casiez et al., CHI 2012). Most hobby repos skip it; it is the
-  main reason the cursor here is steady enough to write with.
-- UNO Q: [Modulino Movement + UNO Q Motion Monitor](https://projecthub.arduino.cc/mario-r/modulino-movement-uno-q-motion-monitor-20cb6f)
-  (`Bridge.notify` streaming pattern), [CWTI UNO Q knowledge base](https://github.com/CWTI-Ltd/arduino_uno_q_knowledge_base_and_playground).
+```
+tap_index   read as: open 100% | left taps 11      <- every tap caught
+tap_middle  read as: open 97%  | right taps 13
+fist        read as: fist 98%                      <- no false clicks
+rest        read as: curled 97%                    <- resting hand doesn't scroll
+```
 
-The code here is a fresh implementation of those patterns; no third-party repo code is vendored.
-"# Design-Project-I" 
+The results go to `~/.config/airpen/tuning.json`, and deleting that file resets to the
+built-in defaults. `python -m airpen.calibrate --refit` re-fits from the saved recording
+without recording again. The built-in defaults come from a real calibration run, which is
+also kept as a regression test (`tests/data/`).
+
+## How it works
+
+```
+webcam 640x480 ─► MediaPipe hand landmarks (21 points, 2 hands) ─► gesture engine ─► smoothing (One Euro)
+                                                                                    └► /dev/uinput virtual mouse + keyboard
+```
+
+- The cursor uses a virtual absolute tablet device, so it works on Wayland. You need to be in
+  the `input` group, which you already are.
+- The cursor tracks your knuckles, not your fingertip, so it stays still while you tap.
+- Hand shape (touches, finger bends) is measured on MediaPipe's metric 3D world landmarks
+  using joint angles. That works at any distance and rotation, and fingers lined up toward the
+  camera don't register as touching.
+- Hand distance is estimated in cm (pinhole model, real palm length vs its image length). The
+  cursor zone scales with it, so control feels the same near or far.
+- Measurements are lightly smoothed over frames. A new pose has to win 2 of the last 3 frames
+  to count. Left/right labels that flip for a frame are corrected, and dim frames are
+  brightened before detection.
+- After about 2 s with no hands in view, AirPen checks only every third frame to save battery.
+- On Linux, AirPen stops the webcam from dropping to 15 fps in dim light
+  (`exposure_dynamic_framerate`). Pass `--dynamic-fps` to leave the camera alone.
+
+Tests: `.venv/bin/python -m pytest -q` runs every gesture against synthetic hands.
+
+## Optional: Arduino UNO Q
+
+`unoq_app/` is an App Lab app that shows AirPen's state on the UNO Q LED matrix. It's off unless
+you start with `--unoq <board-ip>`. It is not tested on hardware yet.
+
+## Agent skills
+
+`.claude/skills/` holds 10 vetted OpenCV and computer-vision skills for Claude Code.
+`yolo-inference` is AGPL and `add-hand-tracking` has no license, so don't redistribute those two.

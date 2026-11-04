@@ -1,0 +1,8 @@
+name: AirPen Matrix
+icon: ✋
+description:
+  Shows AirPen hand-gesture state on the UNO Q 8x13 LED matrix. The PC running AirPen
+  POSTs ready-made frames to /airpen on port 7000; this app forwards them to the MCU.
+
+bricks:
+  - arduino:web_ui

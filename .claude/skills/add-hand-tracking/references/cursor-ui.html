@@ -1,0 +1,135 @@
+<!--
+  CURSOR UI — the visual cursor that follows the hand position.
+
+  This is a fixed-position overlay rendered on top of the entire page.
+  It shows:
+    - A white glowing dot (10px) at the hand position
+    - A subtle ring (28px) around the dot
+    - Visual feedback for fist (click) and scroll states
+
+  STATES:
+    Normal:    white dot + subtle ring
+    Scrolling: dot scales 1.3x, ring expands to 38px, blue glow
+    Fist:      dot shrinks to 0.6x, turns blue, ring contracts to 18px
+
+  POSITIONING:
+    left: {x * 100}vw
+    top:  {y * 100}vh
+    Where x,y come from the cursor pipeline (0–1 range).
+
+  IMPORTANT:
+    - pointer-events: none — so clicks pass through to elements below
+    - z-index: 9999 — above all content
+    - The CSS transitions (0.05s for position, 0.15s for visual states)
+      add extra micro-smoothing on top of the OneEuroFilter
+
+  ADAPT this to your framework:
+    - React: a component with style={{ left: `${x*100}vw`, top: `${y*100}vh` }}
+    - Vue: :style="{ left: x*100+'vw', top: y*100+'vh' }"
+    - Svelte: style="left: {x*100}vw; top: {y*100}vh"
+    - Vanilla: element.style.left = (x*100) + 'vw'
+-->
+
+<!-- CURSOR ELEMENT -->
+<div class="hand-cursor" data-scrolling="false" data-fist="false">
+  <div class="hand-cursor-dot"></div>
+  <div class="hand-cursor-ring"></div>
+</div>
+
+<!-- SCROLL DIRECTION INDICATOR (shown when scrolling) -->
+<div class="hand-scroll-hint" data-direction="down" hidden>
+  <svg width="16" height="10" viewBox="0 0 16 10" fill="none">
+    <path d="M2 2L8 8L14 2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+  </svg>
+</div>
+
+<style>
+  .hand-cursor {
+    position: fixed;
+    z-index: 9999;
+    pointer-events: none;
+    transform: translate(-50%, -50%);
+    /* Micro-smoothing on top of the OneEuroFilter */
+    transition: left 0.05s linear, top 0.05s linear;
+  }
+
+  .hand-cursor-dot {
+    width: 10px;
+    height: 10px;
+    background: white;
+    border-radius: 50%;
+    box-shadow: 0 0 10px rgba(255, 255, 255, 0.6);
+    transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+  }
+
+  /* Scroll state — dot grows, adds blue glow */
+  .hand-cursor[data-scrolling="true"] .hand-cursor-dot {
+    transform: scale(1.3);
+    box-shadow:
+      0 0 16px rgba(255, 255, 255, 0.8),
+      0 0 30px rgba(100, 140, 255, 0.3);
+  }
+
+  /* Fist/click state — dot shrinks and turns blue */
+  .hand-cursor[data-fist="true"] .hand-cursor-dot {
+    transform: scale(0.6);
+    background: rgba(100, 200, 255, 1);
+    box-shadow:
+      0 0 20px rgba(100, 200, 255, 0.8),
+      0 0 40px rgba(100, 200, 255, 0.4);
+  }
+
+  .hand-cursor-ring {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 28px;
+    height: 28px;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    transition: all 0.15s ease;
+  }
+
+  /* Scroll state — ring expands */
+  .hand-cursor[data-scrolling="true"] .hand-cursor-ring {
+    width: 38px;
+    height: 38px;
+    border-color: rgba(100, 140, 255, 0.4);
+  }
+
+  /* Fist/click state — ring contracts */
+  .hand-cursor[data-fist="true"] .hand-cursor-ring {
+    width: 18px;
+    height: 18px;
+    border-color: rgba(100, 200, 255, 0.6);
+  }
+
+  .hand-scroll-hint {
+    position: fixed;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 9998;
+    pointer-events: none;
+    color: rgba(255, 255, 255, 0.25);
+    animation: hand-cursor-bounce 1s ease-in-out infinite;
+  }
+
+  .hand-scroll-hint[data-direction="down"] {
+    bottom: 1rem;
+  }
+
+  .hand-scroll-hint[data-direction="up"] {
+    top: 1rem;
+  }
+
+  /* Flip the arrow for "up" direction */
+  .hand-scroll-hint[data-direction="up"] svg {
+    transform: rotate(180deg);
+  }
+
+  @keyframes hand-cursor-bounce {
+    0%, 100% { transform: translateX(-50%) translateY(0); }
+    50% { transform: translateX(-50%) translateY(4px); }
+  }
+</style>

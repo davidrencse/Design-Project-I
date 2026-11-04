@@ -1,0 +1,190 @@
+<!--
+  INTRO OVERLAY — shown before the website loads.
+
+  Asks the user to choose between mouse control and hand tracking.
+  This is a full-screen overlay that sits on top of everything.
+
+  BEHAVIOR:
+    1. Page loads → overlay appears (dark backdrop, centered card)
+    2. User clicks "ENTER WITH MOUSE" → overlay fades out, normal mouse works
+    3. User clicks "USE HAND TRACKING" → button shows "LOADING TRACKER...",
+       MediaPipe downloads model + requests webcam → overlay fades out,
+       hand tracking active
+
+  DESIGN:
+    - Dark backdrop: rgba(0,0,0,0.92) with fade-in animation
+    - Centered card: max-width 440px, text-centered
+    - Hand icon: SVG depicting finger landmarks (5 fingers + palm)
+    - Muted color palette: whites and grays, subtle borders
+    - Primary button: mouse option (more visible)
+    - Secondary button: hand tracking option (subtle, optional feel)
+
+  ADAPT this to your framework:
+    - React: conditional render with state, onClick handlers
+    - Vue: v-if with reactive state
+    - Svelte: {#if phase === 'intro'}
+    - Vanilla: document.getElementById + style.display
+
+  The overlay should be removed from DOM (not just hidden) after choice
+  to avoid any stacking context or z-index issues with the site.
+-->
+
+<div class="hand-tracking-intro-overlay">
+  <div class="hand-tracking-intro-box">
+
+    <!-- Hand icon SVG -->
+    <div class="hand-tracking-intro-icon">
+      <svg viewBox="0 0 80 80" fill="none">
+        <!-- Index finger (tallest, prominent) -->
+        <path d="M40 10 L40 45" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" opacity="0.8"/>
+        <!-- Middle finger -->
+        <path d="M32 20 L32 42" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" opacity="0.5"/>
+        <!-- Ring finger -->
+        <path d="M48 20 L48 42" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" opacity="0.5"/>
+        <!-- Pinky -->
+        <path d="M24 28 L24 40" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" opacity="0.35"/>
+        <!-- Thumb -->
+        <path d="M56 28 L56 40" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" opacity="0.35"/>
+        <!-- Fingertip dot (index) -->
+        <circle cx="40" cy="8" r="3" fill="currentColor" opacity="0.9"/>
+        <!-- Palm curve -->
+        <path d="M22 42 Q22 60 40 65 Q58 60 58 42" stroke="currentColor" stroke-width="2" opacity="0.4"/>
+      </svg>
+    </div>
+
+    <!-- Title — replace with your site's name -->
+    <h1 class="hand-tracking-intro-title">YOUR SITE</h1>
+
+    <p class="hand-tracking-intro-tagline">Control this website with your hand</p>
+
+    <p class="hand-tracking-intro-desc">
+      Your cursor follows your index finger.
+      Move your hand to the edges to scroll.
+      Make a fist to click.
+    </p>
+
+    <div class="hand-tracking-intro-buttons">
+      <button class="hand-tracking-btn-primary" id="hand-tracking-mouse-btn">
+        ENTER WITH MOUSE
+      </button>
+      <button class="hand-tracking-btn-secondary" id="hand-tracking-start-btn">
+        USE HAND TRACKING
+      </button>
+    </div>
+
+    <p class="hand-tracking-intro-note">
+      Hand tracking is optional. Mouse works as a fallback.
+    </p>
+  </div>
+</div>
+
+<style>
+  .hand-tracking-intro-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 10000;
+    background: rgba(0, 0, 0, 0.92);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    animation: hand-tracking-fade-in 0.6s ease;
+  }
+
+  @keyframes hand-tracking-fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+
+  .hand-tracking-intro-box {
+    text-align: center;
+    max-width: 440px;
+    padding: 2rem;
+    color: white;
+    font-family: system-ui, -apple-system, sans-serif;
+  }
+
+  .hand-tracking-intro-icon {
+    width: 50px;
+    margin: 0 auto 1.5rem;
+    color: rgba(255, 255, 255, 0.4);
+  }
+
+  .hand-tracking-intro-title {
+    font-family: 'Playfair Display', Georgia, serif;
+    font-size: 2.5rem;
+    font-weight: 300;
+    letter-spacing: 0.35em;
+    margin: 0 0 0.4rem;
+  }
+
+  .hand-tracking-intro-tagline {
+    font-size: 0.8rem;
+    letter-spacing: 0.2em;
+    color: rgba(255, 255, 255, 0.3);
+    text-transform: uppercase;
+    margin: 0 0 1.5rem;
+  }
+
+  .hand-tracking-intro-desc {
+    font-size: 0.9rem;
+    color: rgba(255, 255, 255, 0.45);
+    line-height: 1.7;
+    margin: 0 0 2rem;
+  }
+
+  .hand-tracking-intro-buttons {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    align-items: center;
+    margin-bottom: 1.5rem;
+  }
+
+  .hand-tracking-btn-primary {
+    background: rgba(255, 255, 255, 0.07);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    color: white;
+    padding: 0.8rem 2.5rem;
+    font-size: 0.75rem;
+    letter-spacing: 0.25em;
+    cursor: pointer;
+    transition: all 0.3s;
+    font-family: system-ui, sans-serif;
+    min-width: 240px;
+  }
+
+  .hand-tracking-btn-primary:hover {
+    background: rgba(255, 255, 255, 0.14);
+    border-color: rgba(255, 255, 255, 0.4);
+  }
+
+  .hand-tracking-btn-secondary {
+    background: none;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    color: rgba(255, 255, 255, 0.35);
+    padding: 0.6rem 2rem;
+    font-size: 0.65rem;
+    letter-spacing: 0.2em;
+    cursor: pointer;
+    transition: all 0.3s;
+    font-family: system-ui, sans-serif;
+    min-width: 240px;
+  }
+
+  .hand-tracking-btn-secondary:hover:not(:disabled) {
+    color: rgba(255, 255, 255, 0.6);
+    border-color: rgba(255, 255, 255, 0.2);
+  }
+
+  .hand-tracking-btn-secondary:disabled {
+    opacity: 0.4;
+    cursor: wait;
+  }
+
+  .hand-tracking-intro-note {
+    font-size: 0.6rem;
+    color: rgba(255, 255, 255, 0.15);
+    letter-spacing: 0.1em;
+    margin: 0;
+  }
+</style>
