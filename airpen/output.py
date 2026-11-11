@@ -71,6 +71,7 @@ class Output:
     def _wheel(self, v_hi: int, h_hi: int) -> None: ...
     def _ctrl_key(self, down: bool) -> None: ...
     def _combo(self, direction: str) -> None: ...
+    def hotkey(self, keys: list[str]) -> None: ...
 
     # public API (safe to call in any state)
     def move(self, x: float, y: float) -> None:
@@ -140,9 +141,17 @@ class Output:
         _spawn(f"hyprctl setcursor {theme} {64 if big else normal}")
 
     def release_all(self) -> None:
+        error = None
         for b in list(self.held):
-            self.release(b)
-        self.zoom_end()
+            try:
+                self.release(b)
+            except Exception as exc:
+                error = exc
+        try:
+            self.zoom_end()
+        finally:
+            if error is not None:
+                raise error
 
     def close(self) -> None:
         self.release_all()
@@ -183,12 +192,43 @@ class UInputOutput(Output):
             },
             name="AirPen virtual pointer", vendor=0x1209, product=0xA1E0, version=1,
         )
-        self.kbd = UInput(
-            {e.EV_KEY: [e.KEY_LEFTCTRL, e.KEY_LEFTMETA, e.KEY_LEFT, e.KEY_RIGHT]},
-            name="AirPen virtual keyboard", vendor=0x1209, product=0xA1E1, version=1,
-        )
+        try:
+            self.kbd = UInput(
+                {e.EV_KEY: list(set(self._key_codes().values()))},
+                name="AirPen virtual keyboard", vendor=0x1209, product=0xA1E1, version=1,
+            )
+        except BaseException:
+            self.ptr.close()
+            raise
         self._lo_v = 0.0
         self._lo_h = 0.0
+
+    def _key_codes(self) -> dict[str, int]:
+        e = self.e
+        names = {"ctrl": "LEFTCTRL", "shift": "LEFTSHIFT", "alt": "LEFTALT", "super": "LEFTMETA",
+                 "left": "LEFT", "right": "RIGHT", "up": "UP", "down": "DOWN", "space": "SPACE",
+                 "enter": "ENTER", "esc": "ESC", "tab": "TAB", "backspace": "BACKSPACE",
+                 "play_pause": "PLAYPAUSE", "volume_up": "VOLUMEUP", "volume_down": "VOLUMEDOWN", "mute": "MUTE"}
+        names.update({c: c.upper() for c in "abcdefghijklmnopqrstuvwxyz0123456789"})
+        return {k: getattr(e, "KEY_" + v) for k, v in names.items()}
+
+    def hotkey(self, keys: list[str]) -> None:
+        codes = self._key_codes()
+        pressed = []
+        try:
+            for key in keys:
+                code = codes[key.lower()]
+                pressed.append(code)
+                self._key(code, True)
+        finally:
+            error = None
+            for code in reversed(pressed):
+                try:
+                    self._key(code, False)
+                except Exception as exc:
+                    error = exc
+            if error is not None:
+                raise error
 
     def _move(self, x: float, y: float) -> None:
         e = self.e
@@ -236,9 +276,13 @@ class UInputOutput(Output):
             self._key(k, False)
 
     def close(self) -> None:
-        super().close()
-        self.ptr.close()
-        self.kbd.close()
+        try:
+            super().close()
+        finally:
+            try:
+                self.ptr.close()
+            finally:
+                self.kbd.close()
 
 
 class PynputOutput(Output):
@@ -266,6 +310,25 @@ class PynputOutput(Output):
         except Exception:
             return 1920, 1080
 
+    def hotkey(self, keys: list[str]) -> None:
+        aliases = {"super": "cmd", "play_pause": "media_play_pause", "volume_up": "media_volume_up",
+                   "volume_down": "media_volume_down", "mute": "media_volume_mute"}
+        pressed = []
+        try:
+            for name in keys:
+                key = name if len(name) == 1 else getattr(self._Key, aliases.get(name, name))
+                pressed.append(key)
+                self._k.press(key)
+        finally:
+            error = None
+            for key in reversed(pressed):
+                try:
+                    self._k.release(key)
+                except Exception as exc:
+                    error = exc
+            if error is not None:
+                raise error
+
     def _move(self, x: float, y: float) -> None:
         self._m.position = (round(x * (self.size[0] - 1)), round(y * (self.size[1] - 1)))
 
@@ -286,6 +349,8 @@ class PynputOutput(Output):
 
 
 def make_output(backend: str = "auto", **kw) -> Output:
+    if backend not in {"auto", "none", "uinput", "pynput"}:
+        raise ValueError(f"unknown output backend: {backend}")
     if backend == "none":
         return NullOutput(**kw)
     if backend in ("auto", "uinput") and sys.platform.startswith("linux"):
@@ -294,13 +359,20 @@ def make_output(backend: str = "auto", **kw) -> Output:
         except Exception as exc:
             if backend == "uinput":
                 raise
-            print(f"[airpen] uinput unavailable ({exc}); trying pynput", file=sys.stderr)
+            print(f"[airpen] uinput unavailable ({exc})", file=sys.stderr)
             if os.environ.get("WAYLAND_DISPLAY"):
                 print("[airpen] note: pynput cannot move the cursor on Wayland. "
                       "Give yourself /dev/uinput access: sudo usermod -aG input $USER, then log in again.",
                       file=sys.stderr)
+    if backend == "auto" and os.environ.get("WAYLAND_DISPLAY"):
+        print("[airpen] native Wayland input unavailable; recognition only", file=sys.stderr)
+        return NullOutput(**kw)
+    if backend == "uinput":
+        raise RuntimeError("uinput requires Linux")
     try:
         return PynputOutput(**kw)
     except Exception as exc:
+        if backend == "pynput":
+            raise
         print(f"[airpen] pynput unavailable ({exc}); preview only", file=sys.stderr)
         return NullOutput(**kw)

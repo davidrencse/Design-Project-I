@@ -7,8 +7,12 @@
 #   ./run.sh status     is it running? last log lines
 #   ./run.sh fg         run in this terminal with the preview open (Ctrl+C to quit)
 #   ./run.sh calibrate  fit gesture thresholds to your hand (~1 minute)
+#   ./run.sh hand       show the dominant hand; ./run.sh hand left|right sets it (restart to apply)
+#   ./run.sh record     record raw landmarks of your hand, step by step (captures/)
+#   ./run.sh replay [dir]  check the action recognizer against a recording (newest by default)
 set -euo pipefail
-cd "$(dirname "$0")"
+SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+cd "$(dirname "$SELF")"
 PIDFILE="${XDG_RUNTIME_DIR:-/tmp}/airpen.pid"
 LOG="${XDG_STATE_HOME:-$HOME/.local/state}/airpen.log"
 
@@ -19,22 +23,51 @@ setup() {
   fi
   if [ ! -f models/hand_landmarker.task ]; then
     mkdir -p models
-    curl -fL -o models/hand_landmarker.task \
-      https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task
+    local model_tmp
+    model_tmp=$(mktemp models/hand_landmarker.task.XXXXXX)
+    if curl -fL --connect-timeout 15 --max-time 120 -o "$model_tmp" \
+      https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task; then
+      mv "$model_tmp" models/hand_landmarker.task
+    else
+      rm -f "$model_tmp"
+      return 1
+    fi
   fi
 }
 
+# pid of the running AirPen, or fail. The pidfile is not trusted blindly: after a crash the pid may
+# belong to an unrelated process, so it must be a positive integer whose command line says airpen.
 running_pid() {
   [ -s "$PIDFILE" ] || return 1
-  local pid; pid=$(cat "$PIDFILE")
-  kill -0 "$pid" 2>/dev/null && echo "$pid"
+  local pid; pid=$(cat "$PIDFILE" 2>/dev/null) || return 1
+  case "$pid" in ''|*[!0-9]*|0*) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep -q airpen || return 1
+  echo "$pid"
+}
+
+# run an airpen module with the service stopped, then restart the service; keep the module's exit code
+# RESTART=0 leaves the service stopped afterwards (the camera turns off).
+run_exclusive() {
+  local was_running=0 pid rc=0 i
+  if pid=$(running_pid); then
+    was_running=1
+    kill -TERM "$pid"
+    for i in $(seq 1 32); do kill -0 "$pid" 2>/dev/null || break; sleep 0.25; done   # up to ~8 s
+  fi
+  .venv/bin/python -m "$@" || rc=$?
+  if [ "$was_running" = 1 ]; then
+    if [ "${RESTART:-1}" = 1 ]; then "$SELF" start || true
+    else echo "AirPen was stopped for this and stays off (camera off). ./run.sh start to turn it back on."; fi
+  fi
+  exit "$rc"
 }
 
 cmd="${1:-launch}"; [ $# -gt 0 ] && shift
 case "$cmd" in
   launch)
     # start if needed, then show the preview so you can see it's working
-    if ! running_pid >/dev/null; then "$0" start "$@" || exit 1; fi
+    if ! running_pid >/dev/null; then "$SELF" start "$@" || exit 1; fi
     kill -USR2 "$(running_pid)"
     echo "Preview window opened. Closing it only hides it; ./run.sh stop to quit."
     ;;
@@ -59,16 +92,40 @@ case "$cmd" in
     ;;
   calibrate)
     setup
-    was_running=0
-    if pid=$(running_pid); then was_running=1; kill -TERM "$pid"; sleep 1.5; fi
-    .venv/bin/python -m airpen.calibrate || true
-    if [ "$was_running" = 1 ]; then exec "$0" start; fi
+    run_exclusive airpen.calibrate
     ;;
   fg)
     setup
     exec .venv/bin/python -m airpen --show "$@"
     ;;
+  hand)
+    # no arg: print the dominant hand. With arg: save it (AirPen must restart to pick it up).
+    py=python3; [ -x .venv/bin/python ] && py=.venv/bin/python
+    if [ $# -eq 0 ]; then
+      $py -c 'from airpen import settings; print(settings.load_hand())'
+    else
+      if ! hand=$($py -c 'import sys; from airpen import settings; print(settings.save_hand(sys.argv[1]))' "$1"); then
+        echo "usage: $0 hand [left|right]"; exit 2
+      fi
+      echo "dominant hand set to $hand"
+      if running_pid >/dev/null; then echo "AirPen is running: ./run.sh stop && ./run.sh start to apply it"; fi
+    fi
+    ;;
+  record)
+    # guided capture of raw landmarks. Stops AirPen while recording and leaves it off afterwards.
+    setup
+    RESTART=0 run_exclusive airpen.record "$@"
+    ;;
+  replay)
+    # offline check of a recording: expected vs got counts per step. Exit 1 on mismatch.
+    setup
+    exec .venv/bin/python -m airpen.replay "$@"
+    ;;
   *)
-    echo "usage: $0 [start|stop|show|status|fg|calibrate] [airpen options]"; exit 2
+    echo "usage: $0 [start|stop|show|status|fg|calibrate|hand|record|replay] [options]"
+    echo "  hand [left|right]   show or set the dominant hand"
+    echo "  record [--hand ..]  record your hand doing each action (for checking accuracy)"
+    echo "  replay [dir]        replay a recording through the recognizer"
+    exit 2
     ;;
 esac

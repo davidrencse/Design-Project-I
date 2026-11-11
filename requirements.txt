@@ -1,6 +1,7 @@
-opencv-python>=4.10
+opencv-contrib-python>=4.10
 mediapipe>=0.10.14
 numpy>=1.26
+pillow>=10
 evdev>=1.7; sys_platform == "linux"
 pynput>=1.7
 pytest>=8

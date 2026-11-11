@@ -22,6 +22,27 @@ class Hand:
     world: np.ndarray | None = None  # (21,3) metres, true 3D hand shape (no perspective squash)
 
 
+def resolve_camera(index: int | str) -> int | str:
+    """Camera number N -> /dev/videoN, or, if that node is gone, the Nth capture node.
+
+    After a USB replug the webcam can come back under a new number (e.g. /dev/video1) while some
+    other app still holds the old node. Each capture interface's first node has index 0 in sysfs;
+    the others are metadata nodes that cannot deliver frames."""
+    if not isinstance(index, int) or index < 0 or not sys.platform.startswith("linux"):
+        return index
+    if Path(f"/dev/video{index}").exists():
+        return index
+    nodes = []
+    for d in Path("/sys/class/video4linux").glob("video*"):
+        try:
+            if (d / "index").read_text().strip() == "0":
+                nodes.append(int(d.name[5:]))
+        except (OSError, ValueError):
+            continue
+    nodes.sort()
+    return nodes[index] if index < len(nodes) else index
+
+
 class Camera:
     """Reads frames on a background thread and keeps only the newest one.
 
@@ -31,25 +52,31 @@ class Camera:
     def __init__(self, index: int | str = 0, width: int = 1280, height: int = 720, fps: int = 30,
                  lock_fps: bool = True):
         backend = cv2.CAP_V4L2 if sys.platform.startswith("linux") else cv2.CAP_ANY
+        index = resolve_camera(index)
         if lock_fps:
             self._lock_framerate(index)
         self.cap = cv2.VideoCapture(index, backend)
-        if not self.cap.isOpened():
-            raise RuntimeError(f"could not open camera {index!r}")
-        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))  # needed for 720p30 on most UVC cams
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-        self.cap.set(cv2.CAP_PROP_FPS, fps)
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        ok, frame = self.cap.read()
-        if not ok:
-            raise RuntimeError(f"camera {index!r} opened but returned no frame")
-        self.size = (frame.shape[1], frame.shape[0])
-        self._frame, self._seq = frame, 1
-        self._cond = threading.Condition()
-        self._running = True
-        self._thread = threading.Thread(target=self._loop, name="camera", daemon=True)
-        self._thread.start()
+        try:
+            if not self.cap.isOpened():
+                raise RuntimeError(f"could not open camera {index!r}")
+            self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))  # needed for 720p30 on most UVC cams
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+            self.cap.set(cv2.CAP_PROP_FPS, fps)
+            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            ok, frame = self.cap.read()
+            if not ok:
+                raise RuntimeError(f"camera {index!r} opened but returned no frame")
+            self.size = (frame.shape[1], frame.shape[0])
+            self._frame, self._seq = frame, 1
+            self._cond = threading.Condition()
+            self._running = True
+            self._thread = threading.Thread(target=self._loop, name="camera", daemon=True)
+            self._thread.start()
+        except BaseException:
+            self._running = False
+            self.cap.release()      # never leak an opened device when construction fails
+            raise
 
     @staticmethod
     def _lock_framerate(index: int | str) -> None:
@@ -59,8 +86,11 @@ class Camera:
         if not sys.platform.startswith("linux") or not shutil.which("v4l2-ctl"):
             return
         dev = f"/dev/video{index}" if isinstance(index, int) else str(index)
-        subprocess.run(["v4l2-ctl", "-d", dev, "-c", "exposure_dynamic_framerate=0"],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        try:
+            subprocess.run(["v4l2-ctl", "-d", dev, "-c", "exposure_dynamic_framerate=0"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, timeout=2)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
 
     def _loop(self) -> None:
         while self._running:
@@ -137,11 +167,6 @@ class HandTracker:
             pts[:, 2] = arr[:, 2] * w  # MediaPipe z uses roughly the same scale as x
             hands.append(Hand(hd[0].category_name, float(hd[0].score), pts, arr[:, :2].copy(), world))
 
-        # Two hands with the same label happens occasionally; in the mirrored view the
-        # user's right hand is on the right side of the image.
-        if len(hands) == 2 and hands[0].label == hands[1].label:
-            a, b = sorted(hands, key=lambda hh: hh.pts[0, 0])
-            a.label, b.label = "Left", "Right"
         self._stabilize_labels(hands, t)
         return hands
 
@@ -149,6 +174,19 @@ class HandTracker:
         """MediaPipe sometimes flips a single hand's Left/Right label for a frame or two, which
         would make the gesture engine think the hand vanished. If the hand sits exactly where
         the *other* label was a moment ago, and nowhere near its own label's last spot, swap."""
+        if len(hands) == 2:
+            left, right = self._last_wrist.get("Left"), self._last_wrist.get("Right")
+            if left is not None and right is not None and max(t - left[0], t - right[0]) < recent:
+                a, b = hands
+                direct = np.linalg.norm(a.norm[0] - left[1]) + np.linalg.norm(b.norm[0] - right[1])
+                swapped = np.linalg.norm(b.norm[0] - left[1]) + np.linalg.norm(a.norm[0] - right[1])
+                # Only override model labels for a clearly matching pair of recent tracks.
+                if min(direct, swapped) < 0.16 and abs(direct - swapped) > 0.04:
+                    a.label, b.label = ("Left", "Right") if direct < swapped else ("Right", "Left")
+            if hands[0].label == hands[1].label:
+                # With no identity evidence, do not turn the other hand into the dominant
+                # one merely because it crossed the screen. Keep only the confident result.
+                hands[:] = [max(hands, key=lambda h: h.score)]
         if len(hands) == 1:
             h = hands[0]
             other = "Left" if h.label == "Right" else "Right"

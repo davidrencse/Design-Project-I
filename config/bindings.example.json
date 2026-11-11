@@ -1,0 +1,9 @@
+{
+  "index_tap": {"type": "click", "button": "left"},
+  "middle_tap": {"type": "click", "button": "right"},
+  "fist": {"type": "toggle_pointer"},
+  "thumb_swipe_right": {"type": "workspace", "direction": "next"},
+  "thumb_swipe_left": {"type": "workspace", "direction": "prev"},
+  "peace": {"type": "toggle_enabled"},
+  "thumb_tap": {"type": "hotkey", "keys": ["play_pause"]}
+}

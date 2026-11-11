@@ -17,8 +17,9 @@ from dataclasses import asdict
 import cv2
 import numpy as np
 
-from airpen.fx import HandFX
-from airpen.gestures import GestureEngine, Tuning, compute_metrics
+from airpen import ui
+from airpen.fx import CameraOverlay
+from airpen.gestures import Tuning, compute_metrics
 from airpen.main import ROOT
 from airpen.tracker import Camera, HandTracker
 from airpen.tuning_io import CONFIG, SAMPLES
@@ -29,11 +30,7 @@ STEPS = (
     ("tap_index", "Tap THUMB + INDEX together, again and again (other fingers relaxed and straight)"),
     ("tap_middle", "Tap THUMB + MIDDLE together, again and again"),
     ("point", "Point your index finger UP and hold still"),
-    ("zoom", "Spread and pinch THUMB + INDEX slowly, other fingers folded"),
     ("rest", "Relax your hand where moving the cursor feels comfortable"),
-    ("pen_hold", "Hold your PEN like you write with it, keep still"),
-    ("pen_tap_index", "Holding the pen: tap it with your INDEX finger, again and again"),
-    ("pen_tap_middle", "Holding the pen: tap it with your MIDDLE finger, again and again"),
 )
 READY_S, RECORD_S = 2.0, 4.0
 FIELDS = ("tap_index", "tap_middle", "tap_ring", "tap_pinky", "thumb_mcp", "reach",
@@ -204,13 +201,12 @@ def main() -> int:
     tune = Tuning()
     cam = Camera(0, 640, 480)
     tracker = HandTracker(ROOT / "models" / "hand_landmarker.task")
-    engine = GestureEngine(tune)
-    fx = HandFX()
     win = "AirPen calibration"
     cv2.namedWindow(win, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
     cv2.resizeWindow(win, 1280, 960)
     samples: dict[str, list[dict]] = {}
     seq = 0
+    overlay = CameraOverlay()
     try:
         for idx, (step, text) in enumerate(STEPS):
             samples[step] = []
@@ -220,7 +216,6 @@ def main() -> int:
                 frame = cv2.flip(frame, 1)
                 t = time.monotonic()
                 hands = tracker.detect(frame, t)
-                gf = engine.update(hands, t)
                 el = t - start
                 recording = READY_S <= el < READY_S + RECORD_S
                 if recording and len(hands) == 1:
@@ -229,24 +224,21 @@ def main() -> int:
                     row = {k: float(getattr(m, k)) for k in FIELDS}
                     row["bends"] = [float(b) for b in m.bends]
                     samples[step].append(row)
-                img = fx.render(frame, hands, gf)
-                H, W = img.shape[:2]
-                cv2.rectangle(img, (0, 0), (W, 110), (0, 0, 0), -1)
-                cv2.putText(img, f"{idx + 1}/{len(STEPS)}  {text}", (24, 48),
-                            cv2.FONT_HERSHEY_DUPLEX, 0.9, (255, 255, 255), 2, cv2.LINE_AA)
+                one = len(hands) == 1
                 if el < READY_S:
-                    sub = f"get ready... {READY_S - el:.1f}"
-                    col = (0, 200, 255)
+                    status, ok, frac = f"GET READY  {READY_S - el:.1f} S", False, None
                 else:
-                    sub = f"recording  {len(samples[step])} frames" + ("" if len(hands) == 1 else "   (show exactly ONE hand)")
-                    col = (80, 255, 80) if len(hands) == 1 else (60, 60, 255)
+                    status = f"RECORDING  {len(samples[step])} FRAMES"
+                    ok = one
                     frac = min(1.0, (el - READY_S) / RECORD_S)
-                    cv2.rectangle(img, (24, 92), (24 + int((W - 48) * frac), 100), col, -1)
-                cv2.putText(img, sub + "    [space = skip, esc = cancel]", (24, 82),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, col, 2, cv2.LINE_AA)
+                hint = ("SPACE SKIP  /  ESC CANCEL" if one or el < READY_S
+                        else "SHOW EXACTLY ONE HAND  /  SPACE SKIP  /  ESC CANCEL")
+                image = overlay.render_safe(frame, hands)
+                img = ui.camera_guide(image, [f"{idx + 1} / {len(STEPS)}  {step.replace('_', ' ')}",
+                                              text, status, hint], frac)
                 cv2.imshow(win, img)
                 key = cv2.waitKey(1) & 0xFF
-                if key == 27 or cv2.getWindowProperty(win, cv2.WND_PROP_VISIBLE) < 1:
+                if key == 27 or ui.window_closed(win):
                     print("calibration cancelled; nothing saved")
                     return 1
                 if key == ord(" ") or el >= READY_S + RECORD_S:

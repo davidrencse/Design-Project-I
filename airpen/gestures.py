@@ -80,6 +80,7 @@ class Tuning:
     fist_hold: float = 0.8        # seconds
     fist_gap: float = 0.15        # thumb-index must be at least this apart (a pinch is not a fist)
     # ignore hands too close to the camera: landmarks turn to garbage when the hand fills the frame
+    pointer_ref_scale: float = 0.11  # calibrated hand size for cursor sensitivity
     max_hand_size: float = 0.40   # hand length / frame width (normal ~0.2 at 35 cm)
     min_distance_cm: float = 15.0
     # smoothing / voting
@@ -179,13 +180,17 @@ def compute_metrics(pts: np.ndarray, norm: np.ndarray, tune: Tuning,
     def d(i: int, j: int) -> float:
         return float(np.linalg.norm(shape[i] - shape[j])) / s3
 
-    bends = []
-    for mcp, pip, dip, tip in FINGERS:
-        b = (_angle(shape[mcp] - shape[WRIST], shape[pip] - shape[mcp])
-             + _angle(shape[pip] - shape[mcp], shape[dip] - shape[pip])
-             + _angle(shape[dip] - shape[pip], shape[tip] - shape[dip]))
-        bends.append(b)
-    extended = tuple(b < tune.extend_bend for b in bends)
+    # All twelve joint angles in one array operation rather than twelve tiny NumPy
+    # dispatches per hand, per frame. Preserve the zero-length segment convention.
+    joints = shape[np.asarray(FINGERS)]
+    vectors = np.diff(np.concatenate((np.broadcast_to(shape[WRIST], (4, 1, 3)), joints), axis=1), axis=1)
+    u, v = vectors[:, :-1], vectors[:, 1:]
+    nu, nv = np.linalg.norm(u, axis=2), np.linalg.norm(v, axis=2)
+    valid = (nu >= 1e-9) & (nv >= 1e-9)
+    cosine = np.ones((4, 3))
+    np.divide(np.einsum("ijk,ijk->ij", u, v), nu * nv, out=cosine, where=valid)
+    bends = np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0))).sum(axis=1)
+    extended = tuple(bool(b < tune.extend_bend) for b in bends)
 
     # frame width from any landmark (pts = norm * width)
     k = int(np.argmax(norm[:, 0]))
@@ -307,6 +312,9 @@ class TapDetector:
         dev = abs(v - base) if base is not None else 0.0
         self.peak = max(self.peak, dev)
         if dev < tune.tap_dev * 0.5:
+            if not hand_still:          # the whole hand moved back with it: not a tap
+                self.reset()
+                return False
             self.active = False
             return tune.tap_min <= t - self.start <= tune.tap_max
         if t - self.start > tune.tap_max or not hand_still:

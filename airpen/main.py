@@ -1,7 +1,12 @@
-"""AirPen: hand gestures from the webcam control the cursor system-wide.
+"""AirPen: seven hand actions from the webcam, recognized on your dominant hand.
 
-Runs as a background process. The preview window is optional: closing it only hides the
-preview, gesture control keeps running. Stop it with `./run.sh stop` (or SIGTERM / Ctrl+C).
+  1 index tap   2 middle tap   3 fist   4 / 5 thumb swipe right / left (in a fist)
+  6 peace       7 thumb tap (in a fist)
+
+Each action is logged (`ACTION <id> <name> <hand>`), optionally shown as a desktop notification,
+and mapped to configurable PC controls. The preview keeps the color camera with hand landmarks and action feedback.
+Runs as a background process; the preview window is
+optional: closing it only hides the preview. Stop it with `./run.sh stop` (or SIGTERM / Ctrl+C).
 Toggle the preview from anywhere with `./run.sh show` (SIGUSR1).
 """
 from __future__ import annotations
@@ -18,15 +23,14 @@ import time
 from pathlib import Path
 
 import cv2
-import numpy as np
 
-from airpen.gestures import GestureEngine, Tuning
-from airpen.fx import HandFX
+from airpen.actions import LABELS, make_engine
+from airpen.controls import Controls, load_bindings
+from airpen.fx import CameraOverlay
 from airpen.output import make_output
-from airpen.pen import PenDetector
-from airpen.pointer import Pointer
+from airpen.settings import load_hand, norm_hand
 from airpen.tracker import Camera, HandTracker
-from airpen.tuning_io import CONFIG, load_overrides, load_tuning
+from airpen.tuning_io import CONFIG, load_overrides
 
 ROOT = Path(__file__).resolve().parent.parent
 WINDOW = "AirPen"
@@ -45,18 +49,29 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--dynamic-fps", action="store_true",
                    help="let the webcam lower its frame rate in dim light (default: lock it)")
     p.add_argument("--model", default=str(ROOT / "models" / "hand_landmarker.task"))
-    p.add_argument("--backend", choices=("auto", "uinput", "pynput", "none"), default="auto")
-    p.add_argument("--box", type=float, nargs=4, metavar=("X0", "Y0", "X1", "Y1"),
-                   default=(0.25, 0.20, 0.75, 0.70), help="active zone in camera space (0..1)")
-    p.add_argument("--invert-scroll", action="store_true")
-    p.add_argument("--invert-swipe", action="store_true",
-                   help="swipe right = next workspace (default: swipe left = next, like a touchpad)")
-    p.add_argument("--ws-next", help="command for next workspace (default: hyprctl on Hyprland)")
-    p.add_argument("--ws-prev", help="command for previous workspace")
+    p.add_argument("--hand", type=norm_hand, default=None, metavar="{left,right}",
+                   help="your dominant hand; the other hand is ignored (default: saved setting, else right)")
+    p.add_argument("--backend", choices=("auto", "uinput", "pynput", "none"), default="auto",
+                   help="PC input backend; none recognizes without controlling the desktop")
+    p.add_argument("--bindings", type=Path, help="gesture bindings JSON (default: ~/.config/airpen/bindings.json)")
+    p.add_argument("--box", type=float, nargs=4, default=None, help=argparse.SUPPRESS)
+    p.add_argument("--invert-scroll", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--invert-swipe", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--ws-next", help=argparse.SUPPRESS)
+    p.add_argument("--ws-prev", help=argparse.SUPPRESS)
     p.add_argument("--no-notify", action="store_true", help="no desktop notifications")
     p.add_argument("--unoq", metavar="HOST[:PORT]", help="optional: mirror state to an Arduino UNO Q")
     p.add_argument("--frames", type=int, default=0, help="stop after N frames (testing)")
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    if min(args.width, args.height, args.fps) <= 0 or args.frames < 0:
+        p.error("dimensions and fps must be positive; frames must be >= 0")
+    if args.box is not None:
+        x0, y0, x1, y1 = args.box
+        if not (0 <= x0 < x1 <= 1 and 0 <= y0 < y1 <= 1):
+            p.error("--box must satisfy 0 <= x0 < x1 <= 1 and 0 <= y0 < y1 <= 1")
+    if args.hand is None:
+        args.hand = load_hand()
+    return args
 
 
 def single_instance():
@@ -79,12 +94,15 @@ def single_instance():
 class Notifier:
     def __init__(self, enabled: bool):
         self.cmd = shutil.which("notify-send") if enabled else None
+        self._process = None
 
     def __call__(self, title: str, body: str = "") -> None:
         if not self.cmd:
             return
+        if self._process is not None and self._process.poll() is None:
+            return
         try:
-            subprocess.Popen(
+            self._process = subprocess.Popen(
                 [self.cmd, "-a", "AirPen", "-t", "1500",
                  "-h", "string:x-canonical-private-synchronous:airpen", title, body],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -120,17 +138,24 @@ def log(msg: str) -> None:
     print(time.strftime("%H:%M:%S ") + msg, flush=True)
 
 
-def open_camera(args, cam_id):
-    while True:
+def open_camera(args, cam_id, stop: threading.Event):
+    """Open the camera, retrying every 3 s. Returns None as soon as `stop` is set."""
+    while not stop.is_set():
         try:
             return Camera(cam_id, args.width, args.height, args.fps, lock_fps=not args.dynamic_fps)
         except RuntimeError as exc:
             print(f"[airpen] {exc}; retrying in 3 s", file=sys.stderr)
-            time.sleep(3)
+            stop.wait(3)
+    return None
 
 
 def main(argv=None) -> int:
     args = parse_args(argv)
+    try:
+        bindings = load_bindings(args.bindings)
+    except (OSError, ValueError) as exc:
+        print(f"[airpen] invalid bindings: {exc}", file=sys.stderr)
+        return 2
     lock = single_instance()
     cam_id = int(args.camera) if args.camera.isdigit() else args.camera
 
@@ -143,128 +168,104 @@ def main(argv=None) -> int:
     signal.signal(signal.SIGUSR2, lambda *_: force_preview.set())   # always show (./run.sh)
 
     notify = Notifier(not args.no_notify)
-    cam = open_camera(args, cam_id)
-    tracker = HandTracker(args.model)
-    engine = GestureEngine(load_tuning(Tuning()))
-    overrides = load_overrides()
-    pointer = Pointer(tuple(args.box), ref_scale=float(overrides.get("pointer_ref_scale", 0.11)))
-    if overrides:
-        print(f"[airpen] using {len(overrides)} personal thresholds from {CONFIG}")
-    out = make_output(args.backend, ws_next=args.ws_next, ws_prev=args.ws_prev)
-
-    board = led = None
-    if args.unoq:
-        from airpen.ledframe import LedRenderer
-        from airpen.unoq import BoardLink
-
-        board, led = BoardLink(args.unoq), LedRenderer()
-
-    armed = out.name != "none"
-    preview = args.show
-    show_fx = True
-    pen_det = PenDetector()
-    fx = HandFX()
-    window_open = False
-    placed = False
-    swipe_next = "right" if args.invert_swipe else "left"
-    scroll_sign = -1.0 if args.invert_scroll else 1.0
-    fps, last, seq, frames = 0.0, time.monotonic(), 0, 0
-    last_hand_t = 0.0
-    last_status = 0.0
-
-    print(f"[airpen] pid {os.getpid()}  camera {cam.size[0]}x{cam.size[1]}  output={out.name}")
-    notify("AirPen running", "Gesture mode. Hold a fist for mouse mode.")
-
+    cam = tracker = board = controls = None
+    frames = 0
     try:
+        cam = open_camera(args, cam_id, stop)
+        if cam is None:
+            return 0
+        tracker = HandTracker(args.model)
+        overrides = load_overrides()
+        engine = make_engine(args.hand)
+        output = make_output(args.backend, ws_next=args.ws_next, ws_prev=args.ws_prev)
+        controls = Controls(output, bindings, args.box, args.invert_swipe, args.invert_scroll, engine.tune)
+        print(f"[airpen] output={output.name}; bindings=" + ", ".join(f"{k}={v['type']}" for k, v in bindings.items()))
+        if overrides:
+            print(f"[airpen] using {len(overrides)} personal thresholds from {CONFIG}")
+
+        board = led = None
+        if args.unoq:
+            from airpen.ledframe import LedRenderer
+            from airpen.unoq import BoardLink
+
+            board, led = BoardLink(args.unoq), LedRenderer()
+
+        overlay = CameraOverlay()
+        last_action = None
+        preview = args.show
+        window_open = False
+        placed = False
+        seq = 0
+        last_hand_t = 0.0
+        last_status = 0.0
+
+        print(f"[airpen] pid {os.getpid()}  camera {cam.size[0]}x{cam.size[1]}  dominant hand={args.hand}")
+        notify("AirPen running", f"Dominant hand: {args.hand}. Output: {output.name}.")
+
         while not stop.is_set():
             try:
                 seq, frame = cam.read(seq)
             except RuntimeError:
-                # camera vanished (suspend/resume, unplug): drop buttons, reopen, carry on
-                out.release_all()
+                # camera vanished (suspend/resume, unplug): reopen, forget hand state, carry on
                 cam.release()
-                cam, seq = open_camera(args, cam_id), 0
+                cam = None
+                cam, seq = open_camera(args, cam_id, stop), 0
+                if cam is None:
+                    break
+                engine.reset()
+                controls.pointer.update(None, time.monotonic())
+                controls.output.release_all()
                 continue
             t = time.monotonic()
             frames += 1
             # idle: no hand for a while -> look at only every 3rd frame to save battery
-            if t - last_hand_t > 2.0 and frames % 3 and not preview:
+            if (t - last_hand_t > 2.0 and frames % 3 and not preview
+                    and not toggle_preview.is_set() and not force_preview.is_set()):
+                if args.frames and frames >= args.frames:
+                    break
                 continue
             frame = cv2.flip(frame, 1)
             hands = tracker.detect(frame, t)
             if hands:
                 last_hand_t = t
-            fh, fw = frame.shape[:2]
-            for hh in hands:                       # look for a white stylus in each hand
-                sight = pen_det.detect(frame, hh.pts)
-                hh.pen = sight
-                hh.pen_tip_norm = None if sight is None else sight.tip / np.array([fw, fh])
-            gf = engine.update(hands, t)
-            cursor = pointer.update(gf.pointer_xy, t, freeze=gf.freeze, rewind=gf.rewind,
-                                    hand_scale=gf.pointer_scale)
+            af = engine.update(hands, t)
+            try:
+                controls.update(af, t)
+            except Exception as exc:
+                # Failed input must not leave a held key or button, or stop recognition.
+                print(f"[airpen] PC control failed; disabling output: {exc}", file=sys.stderr)
+                try:
+                    controls.close()
+                except Exception as cleanup_exc:
+                    print(f"[airpen] input cleanup failed: {cleanup_exc}", file=sys.stderr)
+                from airpen.output import NullOutput
+                controls = Controls(NullOutput(), bindings, args.box)
 
-            for ev in gf.events:
-                k = ev.kind
-                if k not in ("scroll", "zoom"):
-                    log(f"EVENT {k} {ev.hand} {ev.button}{ev.dir}  armed={armed}")
-                elif frames % 15 == 0:
-                    log(f"EVENT {k} dy={ev.dy:.0f} amount={ev.amount:.0f}  armed={armed}")
-                if k == "pen_on":
-                    notify("Pen mode", "Your grip moves the cursor. Tap the pen with your index finger = click, middle finger = right click. Let go of the pen to stop.")
-                elif k == "cursor_on":
-                    out.cursor_big(True)
-                    notify("Mouse mode", "Move hand = cursor. Tap thumb+index = click, thumb+middle = right click. Hold a fist again to exit.")
-                elif k == "cursor_off":
-                    out.release_all()
-                    out.cursor_big(False)
-                    notify("Gesture mode", "Swipe = switch workspace. Spread / pinch thumb+index = zoom. Point up/down = scroll.")
-                elif k == "press" and armed:
-                    out.press(ev.button)
-                    log(f"ACTION {ev.button} button down")
-                elif k == "release":
-                    out.release(ev.button)
-                elif k == "scroll" and armed:
-                    out.scroll(scroll_sign * ev.dy, scroll_sign * ev.dx)
-                elif k == "zoom" and armed:
-                    out.zoom(ev.amount)
-                elif k == "zoom_end":
-                    out.zoom_end()
-                elif k == "swipe" and armed and ev.dir in ("left", "right"):
-                    direction = "next" if ev.dir == swipe_next else "prev"
-                    out.workspace(direction)
-                    log(f"ACTION workspace {direction}")
-                # (the old "both palms = pause" gesture is gone: it fired by accident and
-                # silently blocked everything. Stop AirPen with ./run.sh stop instead.)
-                if led is not None and k in ("press", "swipe", "cursor_on", "cursor_off"):
-                    led.trigger("click" if k == "press" else k, t, dir=ev.dir)
+
+            for ev in af.events:
+                log(f"ACTION {ev.id} {ev.name} {ev.hand}")
+                last_action = (ev.id, t)
+                notify(f"AirPen: {LABELS[ev.id]}", f"Gesture {ev.id} | {ev.hand} hand")
+                if led is not None:
+                    if ev.id in (4, 5):
+                        led.trigger("swipe", t, dir="right" if ev.id == 4 else "left")
+                    else:
+                        led.trigger("click", t)
 
             if hands and t - last_status > 1.0:
                 last_status = t
-                parts = []
-                for hh in hands:
-                    tr = gf.hands.get(hh.label)
-                    if tr is not None and tr.m is not None:
-                        m = tr.m
-                        parts.append(f"{hh.label}:{tr.pose} bends={[int(b) for b in m.bends]} "
-                                     f"ti={m.tap_index:.2f} tm={m.tap_middle:.2f} ts={m.thumb_side:.2f} "
-                                     f"{m.distance_cm:.0f}cm v={tr.speed():.1f} pen={'YES' if getattr(hh, 'pen', None) else 'no'}")
-                log(f"see {' | '.join(parts)}  mode={('PEN' if gf.pen_mode else 'MOUSE') if gf.cursor_on else 'gesture'} armed={armed}")
-            if armed and gf.cursor_on and cursor is not None and not gf.freeze:
-                out.move(float(cursor[0]), float(cursor[1]))
-            if not armed:
-                out.release_all()
+                m = af.metrics
+                extra = ""
+                if m is not None:
+                    extra = (f" bends={[int(b) for b in m.bends]} ti={m.tap_index:.2f} tm={m.tap_middle:.2f} "
+                             f"lat={af.debug.get('thumb_lat', 0.0):+.2f} {m.distance_cm:.0f}cm")
+                log(f"see hand={engine.hand} seen={af.hand_seen} pose={af.pose} in_fist={af.in_fist}{extra}")
 
             if board is not None:
-                ledf = led.render(t, armed=armed, cursor_on=gf.cursor_on, cursor=cursor, hands=len(hands),
-                                  left_down=any(tr.left.on for tr in gf.hands.values()),
-                                  right_down=any(tr.right.on for tr in gf.hands.values()),
-                                  scrolling=gf.scrolling, zooming=gf.zooming, zoom_level=0.0,
-                                  clutch=gf.clutch)
-                board.send(ledf, {"armed": armed, "cursor": gf.cursor_on, "hands": len(hands)})
-
-            dt, last = t - last, t
-            if dt > 0:
-                fps = 0.9 * fps + 0.1 / dt if fps else 1.0 / dt
+                ledf = led.render(t, armed=True, cursor_on=False, cursor=None, hands=len(hands),
+                                  left_down=False, right_down=False, scrolling=False, zooming=False,
+                                  zoom_level=0.0, clutch=af.in_fist)
+                board.send(ledf, {"armed": True, "cursor": False, "hands": len(hands)})
 
             # ---- optional preview window; closing it never stops gesture control
             if toggle_preview.is_set():
@@ -281,25 +282,21 @@ def main(argv=None) -> int:
                         cv2.resizeWindow(WINDOW, 1280, 960)
                         window_open = True
                         placed = False
-                    mode = "MOUSE MODE" if gf.cursor_on else "GESTURE MODE"
-                    title = (f"AirPen  -  {mode}  -  {'running' if armed else 'PAUSED'}  -  "
-                             f"{len(hands)} hand(s)  -  {fps:.0f} fps   [l = linework on/off, q = hide]")
-                    cv2.setWindowTitle(WINDOW, title)
-                    cv2.imshow(WINDOW, fx.render(frame, hands, gf) if show_fx else frame)
+                    cv2.setWindowTitle(WINDOW, "AirPen")
+                    image = overlay.render_safe(frame, hands, af, engine.hand, last_action, now=t)
+                    cv2.imshow(WINDOW, image)
                     key = cv2.waitKey(1) & 0xFF
                     if not placed:
                         place_window_on_screen()
                         placed = True
-                    if key == ord("l"):
-                        show_fx = not show_fx
-                    elif key == ord("r"):
-                        pointer.recenter()
                     visible = cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) >= 1
                     if key in (ord("q"), 27) or not visible:
                         preview = False
-                except cv2.error:
+                except Exception as exc:
                     # the user closed the window (or the GUI went away): just stop previewing,
                     # gesture control must keep running no matter what the window does
+                    if not isinstance(exc, cv2.error):
+                        print(f"[airpen] preview window failed ({type(exc).__name__}: {exc})", file=sys.stderr)
                     preview = False
             if not preview and window_open:
                 try:
@@ -312,12 +309,17 @@ def main(argv=None) -> int:
             if args.frames and frames >= args.frames:
                 break
     finally:
-        out.close()  # releases any held button / Ctrl before the virtual devices disappear
-        cam.release()
-        tracker.close()
-        if board is not None:
-            board.close()
-        cv2.destroyAllWindows()
+        # Release every resource even when an input device vanished during shutdown.
+        for resource, method in ((controls, "close"), (cam, "release"), (tracker, "close"), (board, "close")):
+            if resource is not None:
+                try:
+                    getattr(resource, method)()
+                except Exception as exc:
+                    print(f"[airpen] cleanup {method} failed: {exc}", file=sys.stderr)
+        try:
+            cv2.destroyAllWindows()
+        except cv2.error:
+            pass
         try:
             PIDFILE.unlink()
         except OSError:

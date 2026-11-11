@@ -29,13 +29,13 @@ class PenSighting:
 
 class PenDetector:
     def __init__(self, sat_max: int = 70, val_min: int = 185, roi_scales: float = 2.4,
-                 min_len: float = 0.35, max_width: float = 0.16, min_aspect: float = 3.0,
+                 min_len: float = 0.35, max_width: float = 0.20, min_aspect: float = 3.0,
                  finger_width: float = 0.24, ridge_min: float = 0.6):
         self.sat_max = sat_max          # white = low saturation...
         self.val_min = val_min          # ...and bright
         self.roi_scales = roi_scales    # search box half-size, in hand sizes
         self.min_len = min_len          # pen must be at least this long (hand sizes)
-        self.max_width = max_width      # and at most this wide
+        self.max_width = max_width      # allow antialiasing/closing around a narrow stylus
         self.min_aspect = min_aspect
         self.finger_width = finger_width  # fingers are masked out with capsules this wide
         self.ridge_min = ridge_min        # share of the stroke that must be darker on BOTH sides
@@ -43,6 +43,9 @@ class PenDetector:
 
     def detect(self, frame_bgr: np.ndarray, pts: np.ndarray) -> PenSighting | None:
         """pts: (21,2+) hand landmarks in pixels (same frame)."""
+        self.debug_mask = None
+        if pts.shape[0] != 21 or not np.isfinite(pts).all():
+            return None
         P = pts[:, :2]
         scale = float(np.linalg.norm(P[0] - P[9]))
         if scale < 12:
@@ -84,6 +87,7 @@ class PenDetector:
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
         wide = cv2.morphologyEx(white, cv2.MORPH_OPEN, kernel)
         thin = cv2.subtract(white, wide)
+        # Keep enough working resolution for a diagonal stylus to survive this cleanup.
         thin = cv2.morphologyEx(thin, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
         thin = cv2.morphologyEx(thin, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
         self.debug_mask = thin
